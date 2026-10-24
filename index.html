@@ -48,7 +48,7 @@ const $ = s => document.querySelector(s);
 const money = n => '$' + Number(n || 0).toLocaleString('es-AR');
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const TABS = {ventas:'Ventas', productos:'Productos', compras:'Compras', caja:'Caja'};
-let P = [], S = [], PR = [], cart = [], tab = 'ventas', msg = '';
+let PALL = [], P = [], S = [], PR = [], cart = [], tab = 'ventas', msg = '';
 
 async function init() {
   const { data } = await sb.auth.getSession();
@@ -80,6 +80,7 @@ async function load() {
     sb.from('socios').select('*').order('id'),
     sb.from('proveedores').select('*').order('nombre')
   ])).map(r => r.data || []);
+  PALL = P; P = PALL.filter(p => p.activo);
 }
 
 async function render() {
@@ -126,7 +127,7 @@ function vVentas(keep) {
       <select id="so">${opts(S, s => 'Cobra: ' + s.nombre)}</select></div>
     <button class="p" id="ok">Guardar venta</button><div class="msg">${msg}</div></section>`;
   saved.forEach((val, i) => val && ($('#' + ['mp', 'ep', 'so'][i]).value = val));
-  cartEvents('v');
+  cartEvents('v'); hist();
   $('#ok').onclick = async () => {
     if (!cart.length) return;
     const { data: v, error } = await sb.from('ventas').insert({ total: total(), metodo_pago: $('#mp').value, estado_pago: $('#ep').value, socio_cobro_id: +$('#so').value }).select().single();
@@ -155,6 +156,24 @@ function vCompras(keep) {
   };
 }
 
+// ---- Historial de ventas (editar / anular) ----
+async function hist() {
+  const { data } = await sb.from('ventas').select('*, venta_items(cantidad, productos(nombre))').order('fecha', { ascending: false }).limit(30);
+  if (tab !== 'ventas') return;
+  const MP = ['efectivo', 'transferencia', 'otro'].map(x => [x, x]), EP = ['pagado', 'pendiente'].map(x => [x, x]), SO = S.map(s => [s.id, s.nombre]);
+  const sel = (id, f, cur, list) => `<select data-v="${id}" data-f="${f}">${list.map(o => `<option value="${o[0]}" ${o[0] == cur ? 'selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`;
+  const el = document.createElement('section'); el.id = 'hist';
+  el.innerHTML = '<h2>Últimas ventas</h2>' + (data || []).map(v => `<div class="row" style="border-bottom:1px solid var(--line);padding-bottom:8px">
+    <div style="flex:1 0 100%"><b>${new Date(v.fecha).toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' })}</b> · ${money(v.total)} · ${v.venta_items.map(i => i.cantidad + '× ' + esc(i.productos?.nombre)).join(', ')}</div>
+    ${sel(v.id, 'metodo_pago', v.metodo_pago, MP)}${sel(v.id, 'estado_pago', v.estado_pago, EP)}${sel(v.id, 'socio_cobro_id', v.socio_cobro_id, SO)}
+    <button class="x" data-del="${v.id}">Anular</button></div>`).join('');
+  $('#hist')?.remove(); $('#app').append(el);
+  el.querySelectorAll('[data-v]').forEach(s => s.onchange = () => sb.from('ventas').update({ [s.dataset.f]: s.value }).eq('id', s.dataset.v));
+  el.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+    if (confirm('¿Anular esta venta? El stock vuelve.')) { await sb.from('ventas').delete().eq('id', b.dataset.del); render(); }
+  });
+}
+
 // ---- Productos ----
 function vProductos() {
   $('#app').innerHTML = `<section><h2>Nuevo producto</h2><div class="row">
@@ -162,35 +181,54 @@ function vProductos() {
     <input id="co" type="number" placeholder="Costo"><input id="pr" type="number" placeholder="Precio">
     <input id="st" type="number" placeholder="Stock"></div><button class="p" id="ok">Agregar</button></section>
     <section><h2>Productos</h2><div class="wrap"><table><tr><th>Nombre</th><th class="n">Costo</th><th class="n">Precio</th><th class="n">Stock</th><th></th></tr>
-    ${P.map(p => `<tr><td>${esc(p.nombre)}<br><small>${esc(p.categoria)}</small></td><td class="n">${money(p.costo)}</td>
+    ${PALL.map(p => `<tr style="${p.activo ? '' : 'opacity:.45'}"><td>${esc(p.nombre)}<br><small>${esc(p.categoria)}</small></td><td class="n">${money(p.costo)}</td>
     <td class="n">${money(p.precio)}</td><td class="n ${p.stock <= 2 ? 'low' : ''}">${p.stock}</td>
-    <td><button class="x" data-e="${p.id}">Precio</button></td></tr>`).join('')}</table></div></section>`;
+    <td><button class="x" data-e="${p.id}">Editar</button> <button class="x" data-b="${p.id}">${p.activo ? 'Baja' : 'Alta'}</button></td></tr>`).join('')}</table></div></section>`;
   $('#ok').onclick = async () => {
     if (!$('#n').value) return;
     await sb.from('productos').insert({ nombre: $('#n').value, categoria: $('#c').value, costo: +$('#co').value, precio: +$('#pr').value, stock: +$('#st').value });
     render();
   };
   document.querySelectorAll('[data-e]').forEach(b => b.onclick = async () => {
-    const p = P.find(x => x.id == b.dataset.e), n = prompt('Nuevo precio de ' + p.nombre, p.precio);
-    if (n !== null && n !== '') { await sb.from('productos').update({ precio: +n }).eq('id', p.id); render(); }
+    const p = PALL.find(x => x.id == b.dataset.e);
+    const n = prompt('Nombre', p.nombre); if (n === null) return;
+    const c = prompt('Categoría', p.categoria || ''), co = prompt('Costo', p.costo), pr = prompt('Precio', p.precio), st = prompt('Stock', p.stock);
+    if ([c, co, pr, st].includes(null)) return;
+    await sb.from('productos').update({ nombre: n, categoria: c, costo: +co, precio: +pr, stock: +st }).eq('id', p.id); render();
+  });
+  document.querySelectorAll('[data-b]').forEach(b => b.onclick = async () => {
+    const p = PALL.find(x => x.id == b.dataset.b);
+    await sb.from('productos').update({ activo: !p.activo }).eq('id', p.id); render();
   });
 }
 
 // ---- Caja ----
-async function vCaja(day) {
-  day = typeof day === 'string' ? day : new Date().toLocaleDateString('sv');
-  const a = new Date(day + 'T00:00:00'), b = new Date(a.getTime() + 864e5);
-  const { data } = await sb.from('ventas').select('*').gte('fecha', a.toISOString()).lt('fecha', b.toISOString());
-  const V = data || [], paid = V.filter(v => v.estado_pago === 'pagado');
-  const sum = f => paid.filter(f).reduce((t, v) => t + +v.total, 0);
-  const pend = V.filter(v => v.estado_pago === 'pendiente').reduce((t, v) => t + +v.total, 0);
-  $('#app').innerHTML = `<section><h2>Cierre de caja</h2><div class="row"><input id="d" type="date" value="${day}"></div>
-    <div class="wrap"><table><tr><th>Socio</th><th class="n">Efectivo</th><th class="n">Transfer.</th><th class="n">Otro</th><th class="n">Total</th></tr>
-    ${S.map(s => { const f = m => sum(v => v.socio_cobro_id == s.id && v.metodo_pago === m);
-      return `<tr><td>${esc(s.nombre)}</td><td class="n">${money(f('efectivo'))}</td><td class="n">${money(f('transferencia'))}</td><td class="n">${money(f('otro'))}</td><td class="n"><b>${money(f('efectivo') + f('transferencia') + f('otro'))}</b></td></tr>`; }).join('')}
-    <tr><td><b>Todos</b></td><td class="n">${money(sum(v => v.metodo_pago === 'efectivo'))}</td><td class="n">${money(sum(v => v.metodo_pago === 'transferencia'))}</td><td class="n">${money(sum(v => v.metodo_pago === 'otro'))}</td><td class="n tot">${money(sum(() => true))}</td></tr></table></div>
-    <p>Pendiente de cobro: <b class="low">${money(pend)}</b> · Ventas del día: ${V.length}</p></section>`;
+async function vCaja(desde) {
+  desde = typeof desde === 'string' ? desde : '';
+  const f = q => desde ? q.gte('fecha', new Date(desde + 'T00:00:00').toISOString()) : q;
+  const [{ data: V }, { data: D }] = await Promise.all([f(sb.from('ventas').select('*')), f(sb.from('depositos').select('*')).order('fecha', { ascending: false })]);
+  const paid = (V || []).filter(v => v.estado_pago === 'pagado'), dep = D || [];
+  const sum = (arr, fn, k = 'total') => arr.filter(fn).reduce((t, x) => t + +x[k], 0);
+  const trans = sum(paid, v => v.metodo_pago === 'transferencia'), otro = sum(paid, v => v.metodo_pago === 'otro'), depT = sum(dep, () => true, 'monto');
+  const efe = s => sum(paid, v => v.metodo_pago === 'efectivo' && v.socio_cobro_id == s.id) - sum(dep, d => d.socio_id == s.id, 'monto');
+  $('#app').innerHTML = `<section><h2>Ventas</h2><div class="row"><input id="d" type="date" value="${desde}"><small style="align-self:center">Desde (vacío = todo)</small></div>
+    <div>Cobrado: <span class="tot">${money(sum(paid, () => true))}</span></div>
+    <div>Pendiente de cobro: <b class="low">${money(sum(V || [], v => v.estado_pago === 'pendiente'))}</b></div></section>
+    <section><h2>Cuenta bancaria</h2><div class="tot">${money(trans + depT)}</div>
+    <small>Transferencias ${money(trans)} + depósitos de socios ${money(depT)}${otro ? ` · Otros medios, no incluidos: ${money(otro)}` : ''}</small></section>
+    <section><h2>Efectivo por socio</h2><table>${S.map(s => `<tr><td>${esc(s.nombre)}</td><td class="n"><b>${money(efe(s))}</b></td>
+    <td class="n"><button class="x" data-pay="${s.id}">Depositar saldo</button></td></tr>`).join('')}</table></section>
+    <section><h2>Depósitos</h2>${dep.map(d => `<div class="row"><span style="flex:1">${new Date(d.fecha).toLocaleDateString('es-AR')} · ${esc(S.find(s => s.id == d.socio_id)?.nombre)}</span>
+    <b>${money(d.monto)}</b><button class="x" data-dd="${d.id}">✕</button></div>`).join('') || '<small>Sin depósitos</small>'}</section>`;
   $('#d').onchange = e => vCaja(e.target.value);
+  document.querySelectorAll('[data-pay]').forEach(b => b.onclick = async () => {
+    const s = S.find(x => x.id == b.dataset.pay), m = prompt(`Depositar en la cuenta bancaria. Efectivo de ${s.nombre}: ${money(efe(s))}`, Math.max(efe(s), 0));
+    if (!m || +m <= 0) return;
+    await sb.from('depositos').insert({ socio_id: s.id, monto: +m }); vCaja(desde);
+  });
+  document.querySelectorAll('[data-dd]').forEach(b => b.onclick = async () => {
+    if (confirm('¿Borrar este depósito?')) { await sb.from('depositos').delete().eq('id', b.dataset.dd); vCaja(desde); }
+  });
 }
 
 init();
