@@ -31,6 +31,11 @@ td.n,th.n{text-align:right}
 .low{color:var(--warn);font-weight:700}
 .msg{color:var(--warn);min-height:20px;margin:6px 0}
 .wrap{overflow-x:auto}
+#fac{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:20px;z-index:9}
+#fac .doc{background:#fff;color:#111;max-width:380px;width:100%;padding:18px;border-radius:8px;font:13px/1.5 ui-monospace,Menlo,monospace}
+#fac hr{border:0;border-top:1px dashed #999;margin:8px 0}
+#fac td{border:0;padding:2px 0}
+@media print{header,main{display:none}#fac{position:static;background:none;padding:0}#fac .no{display:none}}
 </style>
 </head>
 <body>
@@ -47,8 +52,8 @@ const sb = supabase.createClient(SB_URL, SB_KEY);
 const $ = s => document.querySelector(s);
 const money = n => '$' + Number(n || 0).toLocaleString('es-AR');
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const TABS = {ventas:'Ventas', productos:'Productos', compras:'Compras', caja:'Caja'};
-let PALL = [], P = [], S = [], PR = [], cart = [], tab = 'ventas', msg = '';
+const TABS = {ventas:'Ventas', productos:'Productos', compras:'Compras', caja:'Caja', clientes:'Clientes'};
+let PALL = [], P = [], S = [], PR = [], C = [], cart = [], tab = 'ventas', msg = '';
 
 async function init() {
   const { data } = await sb.auth.getSession();
@@ -75,10 +80,11 @@ async function start() {
 }
 
 async function load() {
-  [P, S, PR] = (await Promise.all([
+  [P, S, PR, C] = (await Promise.all([
     sb.from('productos').select('*').order('nombre'),
     sb.from('socios').select('*').order('id'),
-    sb.from('proveedores').select('*').order('nombre')
+    sb.from('proveedores').select('*').order('nombre'),
+    sb.from('clientes').select('*').order('nombre')
   ])).map(r => r.data || []);
   PALL = P; P = PALL.filter(p => p.activo);
 }
@@ -86,7 +92,7 @@ async function load() {
 async function render() {
   await load();
   document.querySelectorAll('[data-t]').forEach(b => b.classList.toggle('on', b.dataset.t === tab));
-  ({ ventas: vVentas, compras: vCompras, productos: vProductos, caja: vCaja })[tab]();
+  ({ ventas: vVentas, compras: vCompras, productos: vProductos, caja: vCaja, clientes: vClientes })[tab]();
 }
 
 const opts = (arr, f) => arr.map(x => `<option value="${x.id}">${esc(f(x))}</option>`).join('');
@@ -119,22 +125,23 @@ const draw = kind => (kind === 'v' ? vVentas : vCompras)(true);
 
 // ---- Ventas ----
 function vVentas(keep) {
-  const saved = keep ? ['mp', 'ep', 'so'].map(i => $('#' + i)?.value) : [];
+  const saved = keep ? ['mp', 'ep', 'so', 'cl'].map(i => $('#' + i)?.value) : [];
   $('#app').innerHTML = `<section><h2>Nueva venta</h2>${cartUI('v')}
     <div class="row" style="margin-top:10px">
       <select id="mp"><option>efectivo</option><option>transferencia</option><option>otro</option></select>
       <select id="ep"><option>pagado</option><option>pendiente</option></select>
       <select id="so">${opts(S, s => 'Cobra: ' + s.nombre)}</select></div>
+    <div class="row"><select id="cl"><option value="">Cliente: sin datos</option>${opts(C, c => c.nombre)}</select><button id="nc">+ Cliente</button></div>
     <button class="p" id="ok">Guardar venta</button><div class="msg">${msg}</div></section>`;
-  saved.forEach((val, i) => val && ($('#' + ['mp', 'ep', 'so'][i]).value = val));
-  cartEvents('v'); hist();
+  saved.forEach((val, i) => val && ($('#' + ['mp', 'ep', 'so', 'cl'][i]).value = val));
+  cartEvents('v'); hist(); $('#nc').onclick = nuevoCliente;
   $('#ok').onclick = async () => {
     if (!cart.length) return;
-    const { data: v, error } = await sb.from('ventas').insert({ total: total(), metodo_pago: $('#mp').value, estado_pago: $('#ep').value, socio_cobro_id: +$('#so').value }).select().single();
+    const { data: v, error } = await sb.from('ventas').insert({ total: total(), metodo_pago: $('#mp').value, estado_pago: $('#ep').value, socio_cobro_id: +$('#so').value, cliente_id: $('#cl').value ? +$('#cl').value : null }).select().single();
     if (error) { msg = error.message; return vVentas(true); }
     const { error: e2 } = await sb.from('venta_items').insert(cart.map(l => ({ venta_id: v.id, producto_id: l.id, cantidad: l.cant, precio_unitario: l.precio })));
     if (e2) { await sb.from('ventas').delete().eq('id', v.id); msg = 'No hay stock suficiente'; return vVentas(true); }
-    cart = []; msg = 'Venta guardada'; render();
+    cart = []; msg = 'Venta guardada'; await render(); verFactura(v.id);
   };
 }
 
@@ -158,17 +165,22 @@ function vCompras(keep) {
 
 // ---- Historial de ventas (editar / anular) ----
 async function hist() {
-  const { data } = await sb.from('ventas').select('*, venta_items(cantidad, productos(nombre))').order('fecha', { ascending: false }).limit(30);
+  const { data } = await sb.from('ventas').select('*, clientes(nombre), venta_items(cantidad, productos(nombre))').order('fecha', { ascending: false }).limit(30);
   if (tab !== 'ventas') return;
-  const MP = ['efectivo', 'transferencia', 'otro'].map(x => [x, x]), EP = ['pagado', 'pendiente'].map(x => [x, x]), SO = S.map(s => [s.id, s.nombre]);
+  const MP = ['efectivo', 'transferencia', 'otro'].map(x => [x, x]), EP = ['pagado', 'pendiente'].map(x => [x, x]), SO = S.map(s => [s.id, s.nombre]), CL = [['', 'Sin cliente'], ...C.map(c => [c.id, c.nombre])];
   const sel = (id, f, cur, list) => `<select data-v="${id}" data-f="${f}">${list.map(o => `<option value="${o[0]}" ${o[0] == cur ? 'selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`;
   const el = document.createElement('section'); el.id = 'hist';
   el.innerHTML = '<h2>Últimas ventas</h2>' + (data || []).map(v => `<div class="row" style="border-bottom:1px solid var(--line);padding-bottom:8px">
-    <div style="flex:1 0 100%"><b>${new Date(v.fecha).toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' })}</b> · ${money(v.total)} · ${v.venta_items.map(i => i.cantidad + '× ' + esc(i.productos?.nombre)).join(', ')}</div>
-    ${sel(v.id, 'metodo_pago', v.metodo_pago, MP)}${sel(v.id, 'estado_pago', v.estado_pago, EP)}${sel(v.id, 'socio_cobro_id', v.socio_cobro_id, SO)}
-    <button class="x" data-del="${v.id}">Anular</button></div>`).join('');
+    <div style="flex:1 0 100%"><b>${new Date(v.fecha).toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' })}</b> · ${money(v.total)}${v.clientes ? ' · ' + esc(v.clientes.nombre) : ''} · ${v.venta_items.map(i => i.cantidad + '× ' + esc(i.productos?.nombre)).join(', ')}</div>
+    <div style="flex:1 0 100%;color:var(--mut)">${v.metodo_pago} · <b class="${v.estado_pago === 'pendiente' ? 'low' : ''}">${v.estado_pago}</b> · Cobra: ${esc(S.find(x => x.id == v.socio_cobro_id)?.nombre)}</div>
+    <button class="x" data-fac="${v.id}">Factura</button>${v.estado_pago === 'pendiente' ? `<button class="x" data-cob="${v.id}" data-m="${v.metodo_pago}">Cobrar</button>` : ''}<button class="x" data-del="${v.id}">Anular</button></div>`).join('');
   $('#hist')?.remove(); $('#app').append(el);
-  el.querySelectorAll('[data-v]').forEach(s => s.onchange = () => sb.from('ventas').update({ [s.dataset.f]: s.value }).eq('id', s.dataset.v));
+  el.querySelectorAll('[data-fac]').forEach(b => b.onclick = () => verFactura(b.dataset.fac));
+  el.querySelectorAll('[data-cob]').forEach(b => b.onclick = async () => {
+    const m = prompt('Forma de pago (efectivo / transferencia / otro)', b.dataset.m);
+    if (!['efectivo', 'transferencia', 'otro'].includes(m)) return;
+    await sb.from('ventas').update({ estado_pago: 'pagado', metodo_pago: m }).eq('id', b.dataset.cob); render();
+  });
   el.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
     if (confirm('¿Anular esta venta? El stock vuelve.')) { await sb.from('ventas').delete().eq('id', b.dataset.del); render(); }
   });
@@ -229,6 +241,51 @@ async function vCaja(desde) {
   document.querySelectorAll('[data-dd]').forEach(b => b.onclick = async () => {
     if (confirm('¿Borrar este depósito?')) { await sb.from('depositos').delete().eq('id', b.dataset.dd); vCaja(desde); }
   });
+}
+
+// ---- Clientes ----
+async function nuevoCliente() {
+  const n = prompt('Nombre del cliente'); if (!n) return;
+  const t = prompt('Teléfono (opcional)') || '';
+  await sb.from('clientes').insert({ nombre: n, telefono: t }); render();
+}
+async function vClientes() {
+  const { data } = await sb.from('ventas').select('cliente_id,total,estado_pago').not('cliente_id', 'is', null);
+  const agg = id => {
+    const L = (data || []).filter(v => v.cliente_id == id);
+    return { n: L.length, t: L.reduce((s, v) => s + +v.total, 0), p: L.filter(v => v.estado_pago === 'pendiente').reduce((s, v) => s + +v.total, 0) };
+  };
+  $('#app').innerHTML = `<section><h2>Clientes</h2><button class="p" id="nc">+ Nuevo cliente</button></section>
+    <section><div class="wrap"><table><tr><th>Cliente</th><th class="n">Compras</th><th class="n">Total</th><th class="n">Debe</th><th></th></tr>
+    ${C.map(c => { const a = agg(c.id); return `<tr><td>${esc(c.nombre)}<br><small>${esc(c.telefono)}</small></td><td class="n">${a.n}</td><td class="n">${money(a.t)}</td>
+    <td class="n ${a.p ? 'low' : ''}">${money(a.p)}</td><td><button class="x" data-ec="${c.id}">Editar</button> <button class="x" data-dc="${c.id}">✕</button></td></tr>`; }).join('') || '<tr><td>Sin clientes todavía</td></tr>'}</table></div></section>`;
+  $('#nc').onclick = nuevoCliente;
+  document.querySelectorAll('[data-ec]').forEach(b => b.onclick = async () => {
+    const c = C.find(x => x.id == b.dataset.ec), n = prompt('Nombre', c.nombre); if (n === null) return;
+    const t = prompt('Teléfono', c.telefono || ''); if (t === null) return;
+    await sb.from('clientes').update({ nombre: n, telefono: t }).eq('id', c.id); render();
+  });
+  document.querySelectorAll('[data-dc]').forEach(b => b.onclick = async () => {
+    if (confirm('¿Borrar cliente? Sus ventas quedan sin cliente.')) { await sb.from('clientes').delete().eq('id', b.dataset.dc); render(); }
+  });
+}
+
+// ---- Comprobante de venta ----
+async function verFactura(id) {
+  const { data: v } = await sb.from('ventas').select('*, clientes(nombre,telefono), socios(nombre), venta_items(cantidad, precio_unitario, productos(nombre))').eq('id', id).single();
+  if (!v) return;
+  $('#fac')?.remove();
+  const el = document.createElement('div'); el.id = 'fac';
+  el.innerHTML = `<div class="doc"><b style="font-size:16px">COMPROBANTE DE VENTA</b><br>N° ${String(v.id).padStart(6, '0')}<br>${new Date(v.fecha).toLocaleString('es-AR')}<hr>
+    ${v.clientes ? `Cliente: ${esc(v.clientes.nombre)}${v.clientes.telefono ? ' · Tel ' + esc(v.clientes.telefono) : ''}<br>` : ''}Cobró: ${esc(v.socios?.nombre)}<hr>
+    <table style="width:100%">${v.venta_items.map(i => `<tr><td>${i.cantidad} × ${esc(i.productos?.nombre)}</td><td style="text-align:right">${money(i.cantidad * i.precio_unitario)}</td></tr>
+    <tr><td colspan="2" style="color:#666">&nbsp;&nbsp;${money(i.precio_unitario)} c/u</td></tr>`).join('')}</table><hr>
+    <b style="font-size:16px">TOTAL ${money(v.total)}</b><br>Pago: ${v.metodo_pago} · ${v.estado_pago.toUpperCase()}<hr>
+    <small>Comprobante interno, no válido como factura fiscal.</small>
+    <div class="row no" style="margin-top:12px"><button class="p" id="fp">Imprimir / PDF</button><button id="fc">Cerrar</button></div></div>`;
+  document.body.append(el);
+  $('#fp').onclick = () => window.print();
+  $('#fc').onclick = () => el.remove();
 }
 
 init();
