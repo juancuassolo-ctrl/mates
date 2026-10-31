@@ -188,7 +188,7 @@ function cartUI(kind) {
     <div class="tot">Total ${money(total())}</div>`;
 }
 function cartEvents(kind) {
-  const fill = () => { const p = P.find(x => x.id == $('#pp').value); if (p) $('#pe').value = kind === 'v' ? p.precio : p.costo; };
+  const fill = () => { const p = P.find(x => x.id == $('#pp').value); if (p) $('#pe').value = kind === 'v' ? Math.round(p.precio * (100 - (p.descuento || 0)) / 100) : p.costo; };
   $('#pp').onchange = fill; fill();
   $('#add').onclick = () => {
     const p = P.find(x => x.id == $('#pp').value);
@@ -271,8 +271,8 @@ function vProductos() {
     <input id="st" type="number" placeholder="Stock"></div><button class="p" id="ok">Agregar</button></section>
     <section><h2>Productos</h2><div class="wrap"><table><tr><th>Nombre</th><th class="n">Costo</th><th class="n">Precio</th><th class="n">Stock</th><th></th></tr>
     ${PALL.map(p => `<tr style="${p.activo ? '' : 'opacity:.45'}"><td>${esc(p.nombre)}<br><small>${esc(p.categoria)}</small></td><td class="n">${money(p.costo)}</td>
-    <td class="n">${money(p.precio)}</td><td class="n ${p.stock <= 2 ? 'low' : ''}">${p.stock}</td>
-    <td><button class="x" data-e="${p.id}">Editar</button> <button class="x" data-ph="${p.id}">Foto${p.foto_url ? ' ✓' : ''}</button> <button class="x" data-cat="${p.id}">${p.en_catalogo ? 'En catálogo ✓' : 'Al catálogo'}</button> <button class="x" data-b="${p.id}">${p.activo ? 'Baja' : 'Alta'}</button></td></tr>`).join('')}</table></div></section>`;
+    <td class="n">${p.descuento ? `<s class="faint">${money(p.precio)}</s> ${money(Math.round(p.precio * (100 - p.descuento) / 100))}<small>−${p.descuento}%</small>` : money(p.precio)}</td><td class="n ${p.stock <= 2 ? 'low' : ''}">${p.stock}</td>
+    <td><button class="x" data-e="${p.id}">Editar</button> <button class="x" data-dto="${p.id}">Descuento</button> <button class="x" data-ph="${p.id}">Foto${p.foto_url ? ' ✓' : ''}</button> <button class="x" data-cat="${p.id}">${p.en_catalogo ? 'En catálogo ✓' : 'Al catálogo'}</button> <button class="x" data-b="${p.id}">${p.activo ? 'Baja' : 'Alta'}</button></td></tr>`).join('')}</table></div></section>`;
   $('#ok').onclick = async () => {
     if (!$('#n').value) return;
     await sb.from('productos').insert({ nombre: $('#n').value, categoria: $('#c').value, costo: +$('#co').value, precio: +$('#pr').value, stock: +$('#st').value });
@@ -288,6 +288,11 @@ function vProductos() {
   document.querySelectorAll('[data-b]').forEach(b => b.onclick = async () => {
     const p = PALL.find(x => x.id == b.dataset.b);
     await sb.from('productos').update({ activo: !p.activo }).eq('id', p.id); render();
+  });
+  document.querySelectorAll('[data-dto]').forEach(b => b.onclick = async () => {
+    const p = PALL.find(x => x.id == b.dataset.dto), n = prompt(`Descuento de ${p.nombre} en % (0 para quitarlo)`, p.descuento || 0);
+    if (n === null) return;
+    await sb.from('productos').update({ descuento: Math.min(90, Math.max(0, Math.round(+n) || 0)) }).eq('id', p.id); render();
   });
   document.querySelectorAll('[data-cat]').forEach(b => b.onclick = async () => {
     const p = PALL.find(x => x.id == b.dataset.cat);
