@@ -234,10 +234,11 @@ function vCompras(keep) {
   const sv = keep ? $('#pv')?.value : null, sm = keep ? $('#cm')?.value : null, ss = keep ? $('#cs')?.value : null, se = keep ? $('#ev')?.value : '';
   $('#app').innerHTML = `<section><h2>${editC ? 'Modificando compra N° ' + String(editC.id).padStart(6, '0') : 'Nueva compra a proveedor'}</h2>
     <div class="row"><select id="pv">${opts(PR, p => p.nombre)}</select><button id="np">+ Proveedor</button></div>
-    ${cartUI('c')}<div class="row" style="margin-top:10px"><select id="cm"><option value="efectivo">Pagó en efectivo</option><option value="transferencia">Pagó por transferencia</option></select><select id="cs">${opts(S, s => 'Pagó: ' + s.nombre)}</select><input id="ev" type="number" min="0" placeholder="Costo de envío (opcional)"></div><div class="msg" id="tt" style="color:var(--muted);min-height:0;margin:0 0 8px"></div><button class="p" id="ok">${editC ? 'Guardar cambios' : 'Guardar compra'}</button>${editC ? ' <button id="cx">Cancelar</button>' : ''}<div class="msg">${msg}</div></section>`;
+    ${cartUI('c')}<div class="row" style="margin-top:10px"><select id="cm"><option value="efectivo">Pagó en efectivo</option><option value="transferencia">Pagó con la cuenta bancaria del negocio</option></select><select id="cs">${opts(S, s => 'Pagó: ' + s.nombre)}</select><input id="ev" type="number" min="0" placeholder="Costo de envío (opcional)"></div><div class="msg" id="tt" style="color:var(--muted);min-height:0;margin:0 0 8px"></div><button class="p" id="ok">${editC ? 'Guardar cambios' : 'Guardar compra'}</button>${editC ? ' <button id="cx">Cancelar</button>' : ''}<div class="msg">${msg}</div></section>`;
   if (sv) $('#pv').value = sv; if (sm) $('#cm').value = sm; if (ss) $('#cs').value = ss; if (se) $('#ev').value = se;
   cartEvents('c'); histC();
   $('#ev').oninput = updTot; updTot();
+  const sync = () => { $('#cs').hidden = $('#cm').value !== 'efectivo'; }; $('#cm').onchange = sync; sync();
   if ($('#cx')) $('#cx').onclick = () => { editC = null; cart = []; render(); };
   $('#np').onclick = async () => { const n = prompt('Nombre del proveedor'); if (n) { await sb.from('proveedores').insert({ nombre: n, telefono: prompt('Teléfono (opcional)') || '' }); render(); } };
   $('#ok').onclick = async () => {
@@ -245,11 +246,11 @@ function vCompras(keep) {
     if (editC) {
       const id = editC.id, del = await sb.from('compra_items').delete().eq('compra_id', id);
       if (del.error) { msg = 'No se pudo modificar: ya se vendió parte de ese stock.'; return vCompras(true); }
-      await sb.from('compras').update({ proveedor_id: +$('#pv').value, total: total() + envio(), envio: envio(), metodo_pago: $('#cm').value, socio_pago_id: +$('#cs').value }).eq('id', id);
+      await sb.from('compras').update({ proveedor_id: +$('#pv').value, total: total() + envio(), envio: envio(), metodo_pago: $('#cm').value, socio_pago_id: $('#cm').value === 'efectivo' ? +$('#cs').value : null }).eq('id', id);
       await sb.from('compra_items').insert(cart.map(l => ({ compra_id: id, producto_id: l.id, cantidad: l.cant, costo_unitario: l.precio })));
       editC = null; cart = []; msg = 'Compra modificada'; await render(); return verTicketCompra(id);
     }
-    const { data: c, error } = await sb.from('compras').insert({ proveedor_id: +$('#pv').value, total: total() + envio(), envio: envio(), metodo_pago: $('#cm').value, socio_pago_id: +$('#cs').value }).select().single();
+    const { data: c, error } = await sb.from('compras').insert({ proveedor_id: +$('#pv').value, total: total() + envio(), envio: envio(), metodo_pago: $('#cm').value, socio_pago_id: $('#cm').value === 'efectivo' ? +$('#cs').value : null }).select().single();
     if (error) { msg = error.message; return vCompras(true); }
     await sb.from('compra_items').insert(cart.map(l => ({ compra_id: c.id, producto_id: l.id, cantidad: l.cant, costo_unitario: l.precio })));
     cart = []; msg = 'Compra guardada, stock actualizado'; await render(); verTicketCompra(c.id);
@@ -347,7 +348,7 @@ async function vCaja(desde) {
     <div>Cobrado: <span class="tot">${money(sum(paid, () => true))}</span></div>
     <div>Pendiente de cobro: <b class="low">${money(sum(V || [], v => v.estado_pago === 'pendiente'))}</b></div><table style="margin-top:8px"><tr><td>Cobrado en efectivo</td><td class="n">${money(sum(paid, v => v.metodo_pago === 'efectivo'))}</td></tr><tr><td>Cobrado por transferencia</td><td class="n">${money(trans)}</td></tr>${otro ? `<tr><td>Otros medios</td><td class="n">${money(otro)}</td></tr>` : ''}</table></section>
     <section><h2>Cuenta bancaria</h2><div class="tot">${money(trans + depT - cpT)}</div>
-    <table><tr><td>Transferencias cobradas</td><td class="n">${money(trans)}</td></tr><tr><td>Depósitos de socios</td><td class="n">${money(depT)}</td></tr><tr><td>Compras pagadas por transferencia</td><td class="n">−${money(cpT)}</td></tr></table>${otro ? `<small>Otros medios, no incluidos: ${money(otro)}</small>` : ''}</section>
+    <table><tr><td>Transferencias cobradas</td><td class="n">${money(trans)}</td></tr><tr><td>Depósitos de socios</td><td class="n">${money(depT)}</td></tr><tr><td>Compras pagadas con la cuenta</td><td class="n">−${money(cpT)}</td></tr></table>${otro ? `<small>Otros medios, no incluidos: ${money(otro)}</small>` : ''}</section>
     <section><h2>Efectivo por socio</h2><div class="wrap"><table><tr><th>Socio</th><th class="n">Cobró en efectivo</th><th class="n">Pagó compras</th><th class="n">Depositó</th><th class="n">Debería tener</th><th></th></tr>${S.map(s => { const c = sum(paid, v => v.metodo_pago === 'efectivo' && v.socio_cobro_id == s.id), g = sum(cp, x => x.metodo_pago === 'efectivo' && x.socio_pago_id == s.id), d = sum(dep, x => x.socio_id == s.id, 'monto'); return `<tr><td>${esc(s.nombre)}</td><td class="n">${money(c)}</td><td class="n">${money(g)}</td><td class="n">${money(d)}</td><td class="n"><b>${money(c - g - d)}</b></td><td class="n"><button class="x" data-pay="${s.id}">Depositar saldo</button></td></tr>`; }).join('')}</table></div></section>
     <section><h2>Depósitos</h2>${dep.map(d => `<div class="row"><span style="flex:1">${new Date(d.fecha).toLocaleDateString('es-AR')} · ${esc(S.find(s => s.id == d.socio_id)?.nombre)}</span>
     <b>${money(d.monto)}</b><button class="x" data-dd="${d.id}">Borrar</button></div>`).join('') || '<small>Sin depósitos</small>'}</section>`;
@@ -424,7 +425,7 @@ async function histC() {
   const { data } = await sb.from('compras').select('*, proveedores(nombre)').order('id', { ascending: false }).limit(15);
   if (tab !== 'compras') return;
   const el = document.createElement('section'); el.id = 'histc';
-  el.innerHTML = `<h2>Últimas compras</h2><div class="wrap"><table><tr><th>Fecha</th><th>Proveedor</th><th>Pago</th><th class="n">Total</th><th></th></tr>${(data || []).map(c => `<tr><td>${new Date(c.fecha + 'T00:00:00').toLocaleDateString('es-AR')}</td><td>${esc(c.proveedores?.nombre)}</td><td>${c.metodo_pago}</td><td class="n">${money(c.total)}${+c.envio ? `<small>incluye envío ${money(c.envio)}</small>` : ''}</td><td class="n" style="white-space:nowrap"><button class="x" data-tc="${c.id}">Ticket</button> <button class="x" data-ec2="${c.id}">Editar</button> <button class="x" data-dc2="${c.id}">Anular</button></td></tr>`).join('') || '<tr><td colspan="5">Todavía no hay compras.</td></tr>'}</table></div>`;
+  el.innerHTML = `<h2>Últimas compras</h2><div class="wrap"><table><tr><th>Fecha</th><th>Proveedor</th><th>Pago</th><th class="n">Total</th><th></th></tr>${(data || []).map(c => `<tr><td>${new Date(c.fecha + 'T00:00:00').toLocaleDateString('es-AR')}</td><td>${esc(c.proveedores?.nombre)}</td><td>${c.metodo_pago === 'efectivo' ? 'efectivo' : 'cuenta bancaria'}</td><td class="n">${money(c.total)}${+c.envio ? `<small>incluye envío ${money(c.envio)}</small>` : ''}</td><td class="n" style="white-space:nowrap"><button class="x" data-tc="${c.id}">Ticket</button> <button class="x" data-ec2="${c.id}">Editar</button> <button class="x" data-dc2="${c.id}">Anular</button></td></tr>`).join('') || '<tr><td colspan="5">Todavía no hay compras.</td></tr>'}</table></div>`;
   $('#histc')?.remove(); $('#app').append(el);
   el.querySelectorAll('[data-tc]').forEach(b => b.onclick = () => verTicketCompra(b.dataset.tc));
   el.querySelectorAll('[data-dc2]').forEach(b => b.onclick = async () => {
@@ -438,7 +439,7 @@ async function histC() {
     if (!c) return;
     cart = c.compra_items.map(i => ({ id: i.producto_id, nombre: i.productos?.nombre, cant: i.cantidad, precio: +i.costo_unitario }));
     editC = { id: c.id }; msg = ''; vCompras();
-    $('#pv').value = c.proveedor_id; $('#cm').value = c.metodo_pago; if (c.socio_pago_id) $('#cs').value = c.socio_pago_id; $('#ev').value = +c.envio || ''; updTot();
+    $('#pv').value = c.proveedor_id; $('#cm').value = c.metodo_pago; if (c.socio_pago_id) $('#cs').value = c.socio_pago_id; $('#ev').value = +c.envio || ''; updTot(); $('#cm').onchange();
     scrollTo({ top: 0, behavior: 'smooth' });
   });
 }
@@ -447,7 +448,7 @@ async function verTicketCompra(id) {
   if (!c) return;
   $('#fac')?.remove();
   const n = String(c.id).padStart(6, '0'), fe = new Date(c.fecha + 'T00:00:00').toLocaleDateString('es-AR');
-  const pago = c.metodo_pago === 'efectivo' ? `efectivo (${c.socios?.nombre})` : 'transferencia';
+  const pago = c.metodo_pago === 'efectivo' ? `efectivo (${c.socios?.nombre})` : 'cuenta bancaria del negocio';
   const txt = `*Orden de compra N° ${n}*\n${fe}\n\n` + c.compra_items.map(i => `${i.cantidad} × ${i.productos?.nombre} — ${money(i.cantidad * i.costo_unitario)}`).join('\n') + `${+c.envio ? '\nEnvío: ' + money(c.envio) : ''}\n\n*Total: ${money(c.total)}*\nPago: ${pago}`;
   const el = document.createElement('div'); el.id = 'fac';
   el.innerHTML = `<div class="doc"><b style="font-size:16px">COMPRA A PROVEEDOR</b><br>N° ${n} · ${fe}<hr>Proveedor: ${esc(c.proveedores?.nombre)}<hr>
