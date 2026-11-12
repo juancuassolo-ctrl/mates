@@ -56,6 +56,11 @@ td:first-child,th:first-child{padding-left:0}td:last-child,th:last-child{padding
 td.n,th.n{text-align:right}
 td small{display:block}
 .wrap{overflow-x:auto}
+details>summary{display:flex;align-items:center;gap:10px;cursor:pointer;list-style:none;font-weight:600;font-size:16px;margin-bottom:12px}
+details>summary::-webkit-details-marker{display:none}
+details>summary::before{content:"";width:7px;height:7px;border:solid var(--muted);border-width:0 1.5px 1.5px 0;transform:rotate(45deg);transition:transform .2s}
+details:not([open])>summary::before{transform:rotate(-45deg)}
+details:not([open])>summary{margin-bottom:0}
 .tot{font:600 28px/36px 'Public Sans',sans-serif;letter-spacing:-.01em}
 #app.caja .tot{color:var(--accent)}
 .faint{color:var(--faint)}
@@ -114,7 +119,7 @@ const P1 = {
 const svg = k => `<svg viewBox="0 0 24 24" aria-hidden="true">${P1[k]}</svg>`;
 const BRAND_HTML = '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M6 11h12c0 5-2 9-6 9s-6-4-6-9z"/><path d="M12 11l4-8"/></svg><span>Ritual<small>Mates · 3 socios</small></span>';
 const TABS = {ventas:'Ventas', clientes:'Clientes', productos:'Productos', compras:'Compras', caja:'Caja'};
-let PALL = [], P = [], S = [], PR = [], C = [], cart = [], tab = 'ventas', msg = '';
+let editC = null, PALL = [], P = [], S = [], PR = [], C = [], cart = [], tab = 'ventas', msg = '';
 
 async function init() {
   $('#brand').innerHTML = BRAND_HTML;
@@ -136,7 +141,7 @@ function login() {
 async function start() {
   $('#nav').hidden = false; document.body.classList.remove('out');
   $('#nav').innerHTML = Object.entries(TABS).map(([k, v]) => `<button data-t="${k}">${svg(k)}${v}</button>`).join('') + `<div class="sep"><a href="catalogo.html" target="_blank">${svg('cat')}Catálogo</a><button id="out">${svg('out')}Salir</button></div>`;
-  document.querySelectorAll('[data-t]').forEach(b => b.onclick = () => { tab = b.dataset.t; cart = []; msg = ''; render(); });
+  document.querySelectorAll('[data-t]').forEach(b => b.onclick = () => { tab = b.dataset.t; cart = []; msg = ''; editC = null; render(); });
   $('#out').onclick = async () => { await sb.auth.signOut(); login(); };
   render();
 }
@@ -225,14 +230,22 @@ function vVentas(keep) {
 // ---- Compras ----
 function vCompras(keep) {
   const sv = keep ? $('#pv')?.value : null, sm = keep ? $('#cm')?.value : null, ss = keep ? $('#cs')?.value : null;
-  $('#app').innerHTML = `<section><h2>Nueva compra a proveedor</h2>
+  $('#app').innerHTML = `<section><h2>${editC ? 'Modificando compra N° ' + String(editC.id).padStart(6, '0') : 'Nueva compra a proveedor'}</h2>
     <div class="row"><select id="pv">${opts(PR, p => p.nombre)}</select><button id="np">+ Proveedor</button></div>
-    ${cartUI('c')}<div class="row" style="margin-top:10px"><select id="cm"><option value="efectivo">Pagó en efectivo</option><option value="transferencia">Pagó por transferencia</option></select><select id="cs">${opts(S, s => 'Pagó: ' + s.nombre)}</select></div><button class="p" id="ok">Guardar compra</button><div class="msg">${msg}</div></section>`;
+    ${cartUI('c')}<div class="row" style="margin-top:10px"><select id="cm"><option value="efectivo">Pagó en efectivo</option><option value="transferencia">Pagó por transferencia</option></select><select id="cs">${opts(S, s => 'Pagó: ' + s.nombre)}</select></div><button class="p" id="ok">${editC ? 'Guardar cambios' : 'Guardar compra'}</button>${editC ? ' <button id="cx">Cancelar</button>' : ''}<div class="msg">${msg}</div></section>`;
   if (sv) $('#pv').value = sv; if (sm) $('#cm').value = sm; if (ss) $('#cs').value = ss;
   cartEvents('c'); histC();
+  if ($('#cx')) $('#cx').onclick = () => { editC = null; cart = []; render(); };
   $('#np').onclick = async () => { const n = prompt('Nombre del proveedor'); if (n) { await sb.from('proveedores').insert({ nombre: n, telefono: prompt('Teléfono (opcional)') || '' }); render(); } };
   $('#ok').onclick = async () => {
     if (!cart.length || !$('#pv').value) { msg = 'Elegí proveedor y productos'; return vCompras(true); }
+    if (editC) {
+      const id = editC.id, del = await sb.from('compra_items').delete().eq('compra_id', id);
+      if (del.error) { msg = 'No se pudo modificar: ya se vendió parte de ese stock.'; return vCompras(true); }
+      await sb.from('compras').update({ proveedor_id: +$('#pv').value, total: total(), metodo_pago: $('#cm').value, socio_pago_id: +$('#cs').value }).eq('id', id);
+      await sb.from('compra_items').insert(cart.map(l => ({ compra_id: id, producto_id: l.id, cantidad: l.cant, costo_unitario: l.precio })));
+      editC = null; cart = []; msg = 'Compra modificada'; await render(); return verTicketCompra(id);
+    }
     const { data: c, error } = await sb.from('compras').insert({ proveedor_id: +$('#pv').value, total: total(), metodo_pago: $('#cm').value, socio_pago_id: +$('#cs').value }).select().single();
     if (error) { msg = error.message; return vCompras(true); }
     await sb.from('compra_items').insert(cart.map(l => ({ compra_id: c.id, producto_id: l.id, cantidad: l.cant, costo_unitario: l.precio })));
@@ -264,15 +277,22 @@ async function hist() {
 }
 
 // ---- Productos ----
+const FILA = p => `<tr style="${p.activo ? '' : 'opacity:.45'}"><td>${esc(p.nombre)}</td><td class="n">${money(p.costo)}</td>
+    <td class="n">${p.descuento ? `<s class="faint">${money(p.precio)}</s> ${money(Math.round(p.precio * (100 - p.descuento) / 100))}<small>−${p.descuento}%</small>` : money(p.precio)}</td><td class="n ${p.stock <= 2 ? 'low' : ''}">${p.stock}</td>
+    <td><button class="x" data-e="${p.id}">Editar</button> <button class="x" data-dto="${p.id}">Descuento</button> <button class="x" data-ph="${p.id}">Foto${p.foto_url ? ' ✓' : ''}</button> <button class="x" data-cat="${p.id}">${p.en_catalogo ? 'En catálogo ✓' : 'Al catálogo'}</button> <button class="x" data-b="${p.id}">${p.activo ? 'Baja' : 'Alta'}</button></td></tr>`;
+function grupos() {
+  const ORD = ['mates', 'bombillas', 'yerbas', 'termos', 'yerberas', 'canastas'], key = p => (p.categoria || '').trim().toLowerCase();
+  const found = [...new Set(PALL.map(key))];
+  const cats = [...ORD.filter(c => found.includes(c)), ...found.filter(c => c && !ORD.includes(c)).sort(), ...(found.includes('') ? [''] : [])];
+  return cats.map(c => { const L = PALL.filter(p => key(p) === c);
+    return `<section><details open><summary>${esc(c ? c.charAt(0).toUpperCase() + c.slice(1) : 'Sin categoría')} <small>${L.length} ${L.length === 1 ? 'producto' : 'productos'}</small></summary><div class="wrap"><table style="table-layout:fixed;min-width:760px"><colgroup><col><col style="width:110px"><col style="width:150px"><col style="width:70px"><col style="width:370px"></colgroup><tr><th>Nombre</th><th class="n">Costo</th><th class="n">Precio</th><th class="n">Stock</th><th></th></tr>${L.map(FILA).join('')}</table></div></details></section>`; }).join('') || '<section>Todavía no hay productos.</section>';
+}
 function vProductos() {
   $('#app').innerHTML = `<section><h2>Nuevo producto</h2><div class="row">
-    <input id="n" placeholder="Nombre"><input id="c" placeholder="Categoría (mate, termo...)">
+    <input id="n" placeholder="Nombre"><input id="c" list="cats" placeholder="Categoría (mates, termos...)"><datalist id="cats">${[...new Set(['mates', 'bombillas', 'yerbas', 'termos', 'yerberas', 'canastas', ...PALL.map(p => (p.categoria || '').trim().toLowerCase()).filter(Boolean)])].map(c => `<option value="${esc(c)}">`).join('')}</datalist>
     <input id="co" type="number" placeholder="Costo"><input id="pr" type="number" placeholder="Precio">
     <input id="st" type="number" placeholder="Stock"></div><button class="p" id="ok">Agregar</button></section>
-    <section><h2>Productos</h2><div class="wrap"><table><tr><th>Nombre</th><th class="n">Costo</th><th class="n">Precio</th><th class="n">Stock</th><th></th></tr>
-    ${PALL.map(p => `<tr style="${p.activo ? '' : 'opacity:.45'}"><td>${esc(p.nombre)}<br><small>${esc(p.categoria)}</small></td><td class="n">${money(p.costo)}</td>
-    <td class="n">${p.descuento ? `<s class="faint">${money(p.precio)}</s> ${money(Math.round(p.precio * (100 - p.descuento) / 100))}<small>−${p.descuento}%</small>` : money(p.precio)}</td><td class="n ${p.stock <= 2 ? 'low' : ''}">${p.stock}</td>
-    <td><button class="x" data-e="${p.id}">Editar</button> <button class="x" data-dto="${p.id}">Descuento</button> <button class="x" data-ph="${p.id}">Foto${p.foto_url ? ' ✓' : ''}</button> <button class="x" data-cat="${p.id}">${p.en_catalogo ? 'En catálogo ✓' : 'Al catálogo'}</button> <button class="x" data-b="${p.id}">${p.activo ? 'Baja' : 'Alta'}</button></td></tr>`).join('')}</table></div></section>`;
+    ${grupos()}`;
   $('#ok').onclick = async () => {
     if (!$('#n').value) return;
     await sb.from('productos').insert({ nombre: $('#n').value, categoria: $('#c').value, costo: +$('#co').value, precio: +$('#pr').value, stock: +$('#st').value });
@@ -401,9 +421,23 @@ async function histC() {
   const { data } = await sb.from('compras').select('*, proveedores(nombre)').order('id', { ascending: false }).limit(15);
   if (tab !== 'compras') return;
   const el = document.createElement('section'); el.id = 'histc';
-  el.innerHTML = `<h2>Últimas compras</h2><div class="wrap"><table><tr><th>Fecha</th><th>Proveedor</th><th>Pago</th><th class="n">Total</th><th></th></tr>${(data || []).map(c => `<tr><td>${new Date(c.fecha + 'T00:00:00').toLocaleDateString('es-AR')}</td><td>${esc(c.proveedores?.nombre)}</td><td>${c.metodo_pago}</td><td class="n">${money(c.total)}</td><td class="n"><button class="x" data-tc="${c.id}">Ticket</button></td></tr>`).join('') || '<tr><td colspan="5">Todavía no hay compras.</td></tr>'}</table></div>`;
+  el.innerHTML = `<h2>Últimas compras</h2><div class="wrap"><table><tr><th>Fecha</th><th>Proveedor</th><th>Pago</th><th class="n">Total</th><th></th></tr>${(data || []).map(c => `<tr><td>${new Date(c.fecha + 'T00:00:00').toLocaleDateString('es-AR')}</td><td>${esc(c.proveedores?.nombre)}</td><td>${c.metodo_pago}</td><td class="n">${money(c.total)}</td><td class="n" style="white-space:nowrap"><button class="x" data-tc="${c.id}">Ticket</button> <button class="x" data-ec2="${c.id}">Editar</button> <button class="x" data-dc2="${c.id}">Anular</button></td></tr>`).join('') || '<tr><td colspan="5">Todavía no hay compras.</td></tr>'}</table></div>`;
   $('#histc')?.remove(); $('#app').append(el);
   el.querySelectorAll('[data-tc]').forEach(b => b.onclick = () => verTicketCompra(b.dataset.tc));
+  el.querySelectorAll('[data-dc2]').forEach(b => b.onclick = async () => {
+    if (!confirm('¿Anular esta compra? El stock que sumó se descuenta.')) return;
+    const { error } = await sb.from('compras').delete().eq('id', b.dataset.dc2);
+    if (error) return alert('No se pudo anular: ya se vendió parte de ese stock.');
+    render();
+  });
+  el.querySelectorAll('[data-ec2]').forEach(b => b.onclick = async () => {
+    const { data: c } = await sb.from('compras').select('*, compra_items(producto_id, cantidad, costo_unitario, productos(nombre))').eq('id', b.dataset.ec2).single();
+    if (!c) return;
+    cart = c.compra_items.map(i => ({ id: i.producto_id, nombre: i.productos?.nombre, cant: i.cantidad, precio: +i.costo_unitario }));
+    editC = { id: c.id }; msg = ''; vCompras();
+    $('#pv').value = c.proveedor_id; $('#cm').value = c.metodo_pago; if (c.socio_pago_id) $('#cs').value = c.socio_pago_id;
+    scrollTo({ top: 0, behavior: 'smooth' });
+  });
 }
 async function verTicketCompra(id) {
   const { data: c } = await sb.from('compras').select('*, proveedores(nombre,telefono), socios(nombre), compra_items(cantidad, costo_unitario, productos(nombre))').eq('id', id).single();
