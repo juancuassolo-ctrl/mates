@@ -214,14 +214,16 @@ function vVentas(keep) {
     <div class="row" style="margin-top:10px">
       <select id="mp"><option>efectivo</option><option>transferencia</option><option>otro</option></select>
       <select id="ep"><option>pagado</option><option>pendiente</option></select>
-      <select id="so">${opts(S, s => 'Cobra: ' + s.nombre)}</select></div>
+      <select id="so"><option value="banco">Cobra: Cuenta bancaria del negocio</option>${opts(S, s => 'Cobra: ' + s.nombre)}</select></div>
     <div class="row"><select id="cl"><option value="">Cliente: sin datos</option>${opts(C, c => c.nombre)}</select><button id="nc">+ Cliente</button></div>
     <button class="p" id="ok">Guardar venta</button><div class="msg">${msg}</div></section>`;
   saved.forEach((val, i) => val && ($('#' + ['mp', 'ep', 'so', 'cl'][i]).value = val));
-  cartEvents('v'); hist(); $('#nc').onclick = nuevoCliente;
+  cartEvents('v'); hist();
+  const sy = w => { const m = $('#mp'), c = $('#so'); if (w === 'so' && c.value === 'banco') m.value = 'transferencia'; else if (w === 'so' && m.value === 'transferencia') m.value = 'efectivo'; else if (w === 'mp' && m.value === 'transferencia') c.value = 'banco'; else if (w === 'mp' && m.value === 'efectivo' && c.value === 'banco') c.selectedIndex = 0; };
+  $('#mp').onchange = () => sy('mp'); $('#so').onchange = () => sy('so'); $('#nc').onclick = nuevoCliente;
   $('#ok').onclick = async () => {
     if (!cart.length) return;
-    const { data: v, error } = await sb.from('ventas').insert({ total: total(), metodo_pago: $('#mp').value, estado_pago: $('#ep').value, socio_cobro_id: +$('#so').value, cliente_id: $('#cl').value ? +$('#cl').value : null }).select().single();
+    const { data: v, error } = await sb.from('ventas').insert({ total: total(), metodo_pago: $('#mp').value, estado_pago: $('#ep').value, socio_cobro_id: $('#so').value === 'banco' ? null : +$('#so').value, cliente_id: $('#cl').value ? +$('#cl').value : null }).select().single();
     if (error) { msg = error.message; return vVentas(true); }
     const { error: e2 } = await sb.from('venta_items').insert(cart.map(l => ({ venta_id: v.id, producto_id: l.id, cantidad: l.cant, precio_unitario: l.precio })));
     if (e2) { await sb.from('ventas').delete().eq('id', v.id); msg = 'No hay stock suficiente'; return vVentas(true); }
@@ -266,14 +268,20 @@ async function hist() {
   const el = document.createElement('section'); el.id = 'hist';
   el.innerHTML = `<h2>Últimas ventas</h2><div class="wrap"><table><tr><th>Fecha</th><th>Cliente y detalle</th><th>Pago</th><th>Cobra</th><th class="n">Total</th><th></th></tr>${(data || []).map(v => `<tr><td>${new Date(v.fecha).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>
     <td>${v.clientes ? esc(v.clientes.nombre) : '<span class="faint">Sin cliente</span>'}<small>${v.venta_items.map(i => i.cantidad + '× ' + esc(i.productos?.nombre)).join(', ')}</small></td>
-    <td>${v.metodo_pago}${v.estado_pago === 'pendiente' ? ' · <span class="low">pendiente</span>' : ''}</td><td>${esc(S.find(x => x.id == v.socio_cobro_id)?.nombre)}</td><td class="n">${money(v.total)}</td>
-    <td class="n" style="white-space:nowrap"><button class="x" data-fac="${v.id}">Factura</button> ${v.estado_pago === 'pendiente' ? `<button class="x" data-cob="${v.id}" data-m="${v.metodo_pago}">Cobrar</button> ` : ''}<button class="x" data-del="${v.id}">Anular</button></td></tr>`).join('') || '<tr><td colspan="6">Todavía no hay ventas.</td></tr>'}</table></div>`;
+    <td>${v.metodo_pago}${v.estado_pago === 'pendiente' ? ' · <span class="low">pendiente</span>' : ''}</td><td>${v.metodo_pago === 'transferencia' ? 'Cuenta bancaria del negocio' : esc(S.find(x => x.id == v.socio_cobro_id)?.nombre || '—')}</td><td class="n">${money(v.total)}</td>
+    <td class="n" style="white-space:nowrap"><button class="x" data-fac="${v.id}">Factura</button> ${v.estado_pago === 'pendiente' ? `<button class="x" data-cob="${v.id}" data-m="${v.metodo_pago}" data-s="${v.socio_cobro_id ?? ''}">Cobrar</button> ` : ''}<button class="x" data-del="${v.id}">Anular</button></td></tr>`).join('') || '<tr><td colspan="6">Todavía no hay ventas.</td></tr>'}</table></div>`;
   $('#hist')?.remove(); $('#app').append(el);
   el.querySelectorAll('[data-fac]').forEach(b => b.onclick = () => verFactura(b.dataset.fac));
   el.querySelectorAll('[data-cob]').forEach(b => b.onclick = async () => {
     const m = prompt('Forma de pago (efectivo / transferencia / otro)', b.dataset.m);
     if (!['efectivo', 'transferencia', 'otro'].includes(m)) return;
-    await sb.from('ventas').update({ estado_pago: 'pagado', metodo_pago: m }).eq('id', b.dataset.cob); render();
+    const u = { estado_pago: 'pagado', metodo_pago: m };
+    if (m === 'transferencia') u.socio_cobro_id = null;
+    if (m === 'efectivo' && !b.dataset.s) {
+      const n = prompt('¿Qué socio recibió el efectivo? (' + S.map(x => x.nombre).join(' / ') + ')'), z = S.find(x => x.nombre.toLowerCase() === (n || '').trim().toLowerCase());
+      if (!z) return; u.socio_cobro_id = z.id;
+    }
+    await sb.from('ventas').update(u).eq('id', b.dataset.cob); render();
   });
   el.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
     if (confirm('¿Anular esta venta? El stock vuelve.')) { await sb.from('ventas').delete().eq('id', b.dataset.del); render(); }
@@ -397,7 +405,7 @@ async function verFactura(id) {
   $('#fac')?.remove();
   const el = document.createElement('div'); el.id = 'fac';
   el.innerHTML = `<div class="doc"><b style="font-size:16px">COMPROBANTE DE VENTA</b><br>N° ${String(v.id).padStart(6, '0')}<br>${new Date(v.fecha).toLocaleString('es-AR')}<hr>
-    ${v.clientes ? `Cliente: ${esc(v.clientes.nombre)}${v.clientes.telefono ? ' · Tel ' + esc(v.clientes.telefono) : ''}<br>` : ''}Cobró: ${esc(v.socios?.nombre)}<hr>
+    ${v.clientes ? `Cliente: ${esc(v.clientes.nombre)}${v.clientes.telefono ? ' · Tel ' + esc(v.clientes.telefono) : ''}<br>` : ''}Cobró: ${v.metodo_pago === 'transferencia' ? 'Cuenta bancaria del negocio' : esc(v.socios?.nombre || '—')}<hr>
     <table style="width:100%">${v.venta_items.map(i => `<tr><td>${i.cantidad} × ${esc(i.productos?.nombre)}</td><td style="text-align:right">${money(i.cantidad * i.precio_unitario)}</td></tr>
     <tr><td colspan="2" style="color:#666">&nbsp;&nbsp;${money(i.precio_unitario)} c/u</td></tr>`).join('')}</table><hr>
     <b style="font-size:16px">TOTAL ${money(v.total)}</b><br>Pago: ${v.metodo_pago} · ${v.estado_pago.toUpperCase()}<hr>
